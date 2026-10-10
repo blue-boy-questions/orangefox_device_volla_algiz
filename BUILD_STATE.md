@@ -30,23 +30,43 @@ workflow. Do not add it. If a libtar fscrypt error appears, re-read the actual
 OrangeFox source first — the API there is different from TeamWin's.
 
 ## Current attempt
-- **Attempt:** 1
-- **Latest run id:** 38055180605 (triggered 2026-10-10T13:17Z, fox_branch=14.1,
-  lunch twrp_algiz-ap2a-eng, target vendorbootimage)
+- **Attempt:** 2
+- **Latest run id:** _pending — triggering after this commit_ (prev: 38055180605
+  FAILED at 99% on the recovery-ramdisk packaging step — real build error, now fixed)
 - **Branch:** main
 
+## Latest REAL failure (run 38055180605 — attempt 1): root/vendor symlink clash (packaging, not compile)
+Build reached 99% (29994/29996) — the ENTIRE compile succeeded, including libtar
+(confirms the fscrypt-v2 analysis: OrangeFox fox_14.1 libtar needs NO patch).
+It died in the `ramdisk_files-timestamp` rule that rsyncs the generic root into
+the recovery root:
+```
+could not make way for new symlink: root/vendor
+cannot delete non-empty directory: root/vendor
+rsync error: some files/attrs were not transferred (code 23) at main.c(1356)
+ninja: build stopped: subcommand failed.
+```
+Root cause: the generic AOSP `root` has `vendor` as a SYMLINK, but the recovery
+root already has a real non-empty `vendor/` dir (the health HAL vintf manifest
+lands in `recovery/root/vendor/etc/vintf/manifest/android.hardware.health@2.1.xml`),
+so rsync can't overwrite the dir with the symlink. Well-known A14+/vendor_boot
+recovery packaging clash.
+FIX (attempt 2): set `OF_MANUAL_ROOT_VENDOR_ERROR_FIX := 1` in fox_algiz.mk —
+OrangeFox's sanctioned workaround (bootable/Recovery Android.mk rm's the stale
+root/vendor symlink and recreates it as a dir in LOCAL_POST_INSTALL_CMD before
+packaging). Verified the flag is wired in the fox_14.1 OrangeFox Android.mk.
+
 ## Exact next step
-1. Poll run 38055180605. The OrangeFox sync (~85 GB) takes 1-2 h, so the run
-   will sit in the "Sync OrangeFox + minimal manifest" step for a long time —
-   that is normal, not a hang. Only treat >90 min with no step change as stuck.
-2. On failure: `gh run view <id> --log-failed` + the uploaded build-tail.log
-   artifact; find the first real error; classify infra vs real (see below);
-   smallest fix; commit via `do_commit.py` (or clone+push — see note); re-trigger
-   with `gh workflow run build-orangefox.yml -R $R --ref main`.
-3. On success: `gh run download <id>`, validate vendor_boot.img
-   (`~/.hermes/twrp_algiz/validate_vendor_boot.py <img> --fstab-ref
-   stock_recovery.fstab.ref`), confirm the OrangeFox zip + vendor_ramdisk_recovery.cpio
-   exist, record sha256, mark DONE, disable the watchdog, final Telegram report.
+1. (this commit) land OF_MANUAL_ROOT_VENDOR_ERROR_FIX + state.
+2. Trigger `gh workflow run build-orangefox.yml -R $R --ref main` (defaults).
+   Record run id. Each run re-syncs (~1 h); expect ~1h15m total.
+3. Poll. On the next failure, diagnose from build-tail.log; on success, validate.
+
+## Hypotheses already tried that did NOT work (never repeat)
+- **H1** (attempt 1, run 38055180605): first build with no root/vendor handling.
+  FAILED at 99% packaging: rsync code 23, root/vendor symlink-vs-dir clash. The
+  COMPILE was 100% clean (no libtar/fscrypt errors — do NOT add the TWRP libtar
+  patch here). Fixed in attempt 2 with OF_MANUAL_ROOT_VENDOR_ERROR_FIX.
 
 ## Failure classification
 - **Infrastructure** (retry, no code change): timeouts, `Could not resolve host`,

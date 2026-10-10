@@ -42,6 +42,16 @@ OF_NO_TREBLE_COMPATIBILITY_CHECK := 1
 OF_ENABLE_ALL_PARTITION_TOOLS := 1
 OF_USE_LZ4_COMPRESSION := 1
 
+# Work around the "cannot delete non-empty directory: root/vendor" packaging
+# error at the end of the recovery-ramdisk build. On this GKI/vendor_boot
+# device the generic AOSP root has `vendor` as a symlink, but the recovery root
+# gets a real non-empty `vendor/` dir (the health HAL vintf manifest lands in
+# recovery/root/vendor/etc/vintf/...), so rsync (code 23) can't replace the dir
+# with the symlink. This OrangeFox flag rm's the stale root/vendor symlink and
+# recreates it as a dir before packaging. (Officially a workaround, but it is
+# the sanctioned OrangeFox fix for A14+/vendor_boot trees and is widely used.)
+OF_MANUAL_ROOT_VENDOR_ERROR_FIX := 1
+
 # Fox installer housekeeping
 OF_DISABLE_MIUI_SPECIFIC_PARTITIONS := 1
 # NOTE: FOX_* vars (e.g. FOX_DELETE_AROMAFM) are intentionally NOT here — the
