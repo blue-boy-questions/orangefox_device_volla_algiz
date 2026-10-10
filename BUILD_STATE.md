@@ -30,12 +30,43 @@ workflow. Do not add it. If a libtar fscrypt error appears, re-read the actual
 OrangeFox source first — the API there is different from TeamWin's.
 
 ## Current attempt
-- **Attempt:** 2
-- **Latest run id:** _pending — triggering after this commit_ (prev: 38055180605
-  FAILED at 99% on the recovery-ramdisk packaging step — real build error, now fixed)
+- **Attempt:** 3
+- **Latest run id:** 38084817830 (fox_14.1, now with the repack+auto-prerelease pipeline)
 - **Branch:** main
+- Attempt 2 (run 38061970554) built GREEN and validated, BUT the raw image
+  BOOTLOOPED on device (see "On-device failures" below). The build is not the
+  deliverable — a FLASHABLE image is. The workflow now post-processes the raw
+  output into a flashable vendor_boot + publishes a pre-release.
 
-## Latest REAL failure (run 38055180605 — attempt 1): root/vendor symlink clash (packaging, not compile)
+## On-device failures (attempt 2 image) — root cause found, do NOT re-fight
+The green CI image bootlooped BOTH recovery and the ROM. Two defects in the raw
+`mka vendorbootimage` output, both fixed by `scripts/repack_vendor_boot.sh`:
+1. **Stripped platform fragment.** vendor_boot carries TWO ramdisk fragments:
+   `platform` (type 1) + `recovery` (type 2). The build only emits a STRIPPED
+   generic `platform` fragment (3.4 MB, 0 kernel modules, no fstab.mt6877) vs
+   stock's 8.8 MB / 175 vendor .ko + fstab. The platform fragment is the
+   first-stage ramdisk SHARED with normal boot, so a stripped one breaks
+   first-stage mount → ROM *and* recovery bootloop. Fix: swap the stock platform
+   fragment back in verbatim (prebuilt `prebuilt/stock_vendor_ramdisk_platform.cpio.gz`,
+   sha256 c2edeb8f…). Verified byte-identical to the user's on-device stock.
+2. **lz4 recovery fragment.** Our recovery fragment was lz4; stock vendor_boot is
+   all gzip. This MediaTek bootloader can bootloop on an unexpected
+   vendor_ramdisk compression. Fix: recompress the OrangeFox recovery fragment to
+   gzip.
+   Plus: **vbmeta must be flashed disabled.** Stock vbmeta has a hash descriptor
+   pinning vendor_boot's hash+size; our repack changes both, so stock vbmeta
+   rejects it → bootloop. Ship `prebuilt/vbmeta-disabled.img` (AVB flags=3,
+   verity+verification disabled); user flashes it alongside.
+   The repacked image (stock platform + gzip OF recovery + stock dtb + AVB NONE)
+   is `vendor_boot-algiz-FLASHABLE.img`; local sha of the hand-built equivalent
+   (FIXED2) d55725b0…; the CI-built one is content-equal (gzip mtime differs).
+
+## STILL UNVERIFIED on device
+Even the flashable image is not yet confirmed to BOOT. If it still bootloops,
+get the ramoops/pstore console log (device has `ramoops.mem_address=0x48090000`;
+helper at /sdcard/recovery/grab-log.sh) — do not keep reflashing blind.
+
+## Latest REAL (build) failure (run 38055180605 — attempt 1): root/vendor symlink clash
 Build reached 99% (29994/29996) — the ENTIRE compile succeeded, including libtar
 (confirms the fscrypt-v2 analysis: OrangeFox fox_14.1 libtar needs NO patch).
 It died in the `ramdisk_files-timestamp` rule that rsyncs the generic root into
