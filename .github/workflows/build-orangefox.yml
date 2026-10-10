@@ -29,6 +29,8 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 350
+    permissions:
+      contents: write        # needed to create the pre-release + upload assets
     steps:
       - name: Checkout device tree
         uses: actions/checkout@v4
@@ -217,6 +219,28 @@ jobs:
           fi
           echo "=== produced: $OUT ($(stat -c%s "$OUT") bytes) ==="
 
+      - name: Repack flashable vendor_boot (stock platform fragment + gzip recovery)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$WS"
+          mkdir -p /mnt/fox/artifacts
+          # The raw build output has a STRIPPED generic platform fragment (no
+          # vendor modules / no fstab) that bootloops the ROM *and* recovery,
+          # and an lz4 recovery fragment this MediaTek bootloader can reject.
+          # repack_vendor_boot.sh swaps the stock platform fragment back in,
+          # recompresses the OrangeFox recovery fragment to gzip, and re-adds the
+          # AVB NONE footer -> a vendor_boot that boots to OrangeFox and leaves
+          # normal boot stock. See device_tree/scripts/repack_vendor_boot.sh.
+          bash "$GITHUB_WORKSPACE/device_tree/scripts/repack_vendor_boot.sh" \
+            "$WS" "$GITHUB_WORKSPACE/device_tree" \
+            /mnt/fox/artifacts/vendor_boot-algiz-FLASHABLE.img
+          # vbmeta with verity+verification disabled (flags=3) — REQUIRED, because
+          # stock vbmeta pins vendor_boot's hash+size and would reject our repack.
+          cp "$GITHUB_WORKSPACE/device_tree/prebuilt/vbmeta-disabled.img" \
+             /mnt/fox/artifacts/vbmeta-disabled.img
+          echo "=== flashable set ==="; ls -lh /mnt/fox/artifacts/*.img
+
       - name: Collect outputs
         if: always()
         run: |
@@ -231,6 +255,8 @@ jobs:
                    "$OUTDIR"/*vendor_ramdisk_recovery.cpio*; do
             [ -f "$f" ] && cp -v "$f" /mnt/fox/artifacts/ || true
           done
+          # keep the raw (unflashable) build output under a clear name for debugging
+          [ -f "$OUTDIR/vendor_boot.img" ] && cp -v "$OUTDIR/vendor_boot.img" /mnt/fox/artifacts/vendor_boot-RAW-unflashable.img || true
           tail -c 400000 /mnt/fox/build.log > /mnt/fox/artifacts/build-tail.log || true
           echo "=== artifacts ==="
           ls -lh /mnt/fox/artifacts || true
@@ -244,3 +270,55 @@ jobs:
           path: /mnt/fox/artifacts/*
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Publish pre-release (flashable set)
+        # only when the flashable image actually got produced (build succeeded)
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd /mnt/fox/artifacts
+          test -f vendor_boot-algiz-FLASHABLE.img || { echo "::error::no flashable image to release"; exit 1; }
+          TAG="ofox-r${{ github.run_number }}"
+          NOTES="$(cat <<EOF
+          OrangeFox R12.0 (Unofficial) for Volla Phone Quintus (algiz) — automated pre-release.
+
+          Build: CI run ${{ github.run_id }} (fox_${{ inputs.fox_branch }}, target ${{ inputs.build_target }}).
+          **UNTESTED on hardware. Unlocked bootloader required. Back up stock vendor_boot_a/b first.**
+
+          ## Flash (bootloader):
+          \`\`\`
+          fastboot --disable-verity --disable-verification flash vbmeta vbmeta-disabled.img
+          fastboot flash vendor_boot vendor_boot-algiz-FLASHABLE.img
+          fastboot reboot recovery
+          \`\`\`
+          A/B: append the slot (vbmeta_a / vendor_boot_a) to touch one slot only.
+
+          ## Assets
+          - \`vendor_boot-algiz-FLASHABLE.img\` — repacked: stock platform fragment + OrangeFox recovery (gzip) + stock dtb, AVB NONE. THIS is the one to flash.
+          - \`vbmeta-disabled.img\` — vbmeta with verity+verification disabled (flags=3). Required, else the stock vbmeta rejects the repacked vendor_boot and the device bootloops.
+          - \`OrangeFox-*.zip\` — OrangeFox installer zip (fastbootd ramdisk path).
+          - \`vendor_boot-RAW-unflashable.img\` — raw build output (stripped platform fragment); kept for debugging, do NOT flash.
+
+          ## Known risks
+          FBE v2 decryption of /data, vendor_boot-as-recovery is experimental, touch/display unverified.
+          Restore stock vendor_boot (md5 32adf911d8c2e206dc389019b1007573) to revert.
+          EOF
+          )"
+          gh release create "$TAG" -R "${{ github.repository }}" \
+            --prerelease \
+            --title "OrangeFox R12.0 (Unofficial) algiz — build #${{ github.run_number }} (UNTESTED)" \
+            --notes "$NOTES" \
+            vendor_boot-algiz-FLASHABLE.img \
+            vbmeta-disabled.img \
+            vendor_boot-RAW-unflashable.img \
+            SHA256SUMS \
+            OrangeFox-*.zip 2>&1 || {
+              echo "::warning::release create failed (asset glob or dup tag); retrying without the zip glob"
+              gh release create "$TAG" -R "${{ github.repository }}" --prerelease \
+                --title "OrangeFox R12.0 (Unofficial) algiz — build #${{ github.run_number }} (UNTESTED)" \
+                --notes "$NOTES" \
+                vendor_boot-algiz-FLASHABLE.img vbmeta-disabled.img vendor_boot-RAW-unflashable.img SHA256SUMS
+            }
+          echo "released: ${{ github.server_url }}/${{ github.repository }}/releases/tag/$TAG"
